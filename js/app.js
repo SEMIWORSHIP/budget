@@ -337,6 +337,7 @@ function homeView() {
   const left = items.filter((i) => !i.done).reduce((s, i) => s + Math.max(0, i.amount - i.paid), 0);
   const payments = items.length ? `<section class="card">
     <h2>Платежи месяца <span class="muted small">${left ? 'осталось ' + money(left) : 'всё оплачено'}</span></h2>
+    <p class="muted small hint-top">Нажми на платёж, чтобы поменять сумму или дату на этот месяц.</p>
     ${items.map(paymentRow).join('')}
   </section>` : '';
 
@@ -394,7 +395,19 @@ function paymentItems(now = new Date(), current = true) {
   // Что по сроку было раньше первой сверки в этом месяце, уже сидит в остатке на картах.
   const at = S.settings?.cash?.at;
   const snap = at && current && C.ym(new Date(at)) === C.ym(now) ? C.startOfDay(new Date(at)) : null;
+  // Правки на один месяц: другая сумма, другая дата, «в этом месяце не нужно».
+  const ov = S.settings?.overrides?.[C.ym(now)] || {};
   const push = (item) => {
+    const o = ov[item.kind + ':' + item.id];
+    if (o) {
+      item.changed = true;
+      if (o.amount != null) {
+        item.amount = o.amount;
+        item.done = item.amount <= 0 || item.paid >= item.amount - 0.5;
+      }
+      if (o.day) item.due = dueDate(o.day, now);
+      if (o.skip) { item.done = true; item.skipped = true; item.movedTo = o.movedTo || ''; }
+    }
     if (!item.done && snap && item.due && item.due < snap) { item.done = true; item.assumed = true; }
     items.push(item);
   };
@@ -441,14 +454,18 @@ function paymentRow(i) {
     const d = i.due.getDate() + ' ' + C.MONTHS_GEN[i.due.getMonth()];
     when = i.due < today && !i.done ? `<span class="bad-text">просрочено, было до ${d}</span>` : (i.oneOff ? d : `до ${d}`);
   }
-  const sub = i.assumed ? `${money(i.amount)} · оплачено до сверки`
+  const moved = i.movedTo ? parseIso(i.movedTo) : null;
+  const sub = i.skipped ? (moved ? `перенесено на ${moved.getDate()} ${C.MONTHS_GEN[moved.getMonth()]}` : 'в этом месяце не нужно')
+    : i.assumed ? `${money(i.amount)} · оплачено до сверки`
     : i.done ? 'оплачено ' + money(i.paid)
     : i.paid > 0 ? `оплачено ${money(i.paid)} из ${money(i.amount)}` : `<b>${money(i.amount)}</b> · ${when}`;
   const act = { cat: 'pay-cat', debt: 'pay-debt', plan: 'pay-plan', church: 'pay-church' }[i.kind];
+  const pill = i.oneOff ? ' <span class="pill">разово</span>' : i.changed && !i.skipped ? ' <span class="pill">изменено</span>' : '';
   return `<div class="row pay ${i.done ? 'done' : ''}">
     <span class="emo">${esc(i.emoji)}</span>
-    <span class="grow"><span class="name">${esc(i.name)}${i.oneOff ? ' <span class="pill">разово</span>' : ''}</span><span class="sub">${sub}</span></span>
-    ${i.done ? '<span class="check" aria-label="Оплачено">✓</span>' : `<button class="btn small" data-act="${act}" data-id="${esc(i.id)}">${i.kind === 'church' ? 'Отдать' : 'Оплатить'}</button>`}
+    <button class="grow pay-edit" data-act="pay-edit" data-kind="${i.kind}" data-id="${esc(i.id)}" aria-label="Изменить «${esc(i.name)}»">
+      <span class="name">${esc(i.name)}${pill}</span><span class="sub">${sub}</span></button>
+    ${i.skipped ? '<span class="check skip" aria-label="Не нужно">–</span>' : i.done ? '<span class="check" aria-label="Оплачено">✓</span>' : `<button class="btn small" data-act="${act}" data-id="${esc(i.id)}">${i.kind === 'church' ? 'Отдать' : 'Оплатить'}</button>`}
   </div>`;
 }
 
@@ -925,6 +942,38 @@ function openPayPlan(id) {
   </form>`);
 }
 
+// Правка платежа только на один месяц. Перенос в другой месяц = «здесь не нужно» + дата там.
+function openPayEdit(kind, id) {
+  if (kind === 'plan') return openPlanEdit(id);
+  if (kind === 'church') return openChurch();
+  const now = new Date();
+  const ym = C.ym(now);
+  const item = paymentItems(now).find((i) => i.kind === kind && i.id === id);
+  if (!item) return;
+  const key = kind + ':' + id;
+  const o = S.settings?.overrides?.[ym]?.[key];
+  const monthPrep = C.MONTHS_PREP[now.getMonth()];
+  const dueIso = item.due ? C.isoDate(item.due) : '';
+  openSheet(`<form data-form="pay-edit" data-key="${esc(key)}">
+    <h2>${esc(item.emoji)} ${esc(item.name)}</h2>
+    <p class="muted small">Меняется только платёж в ${monthPrep}. В следующие месяцы всё будет как обычно.</p>
+    ${field(`Сумма в ${monthPrep}, ₽`, 'amount', item.amount, numAttrs)}
+    ${field('Дата платежа (можно перенести на другой месяц)', 'date', item.movedTo || dueIso, 'type="date"')}
+    <label class="check-label"><input type="checkbox" name="skip" ${item.skipped && !item.movedTo ? 'checked' : ''}> В ${monthPrep} платить не нужно</label>
+    <button class="btn primary">Сохранить</button>
+    ${o ? `<button type="button" class="btn" data-act="pay-reset" data-key="${esc(key)}">Вернуть как обычно</button>` : ''}
+    <button type="button" class="btn danger" data-act="${kind === 'cat' ? 'cat-edit' : 'debt-edit'}" data-id="${esc(id)}">Изменить навсегда</button>
+  </form>`);
+}
+
+function resetOverride(key) {
+  const ym = S.month;
+  const o = S.settings?.overrides?.[ym]?.[key];
+  const patch = { [ym]: { [key]: null } };
+  if (o?.movedTo) patch[o.movedTo.slice(0, 7)] = { [key]: null };
+  return save(H, { overrides: patch });
+}
+
 function openChurch() {
   const pct = churchPct();
   openSheet(`<form data-form="church">
@@ -1098,6 +1147,27 @@ const FORMS = {
     closeSheet();
     toast(`${p.name}: −${money(amount)}`);
   },
+  'pay-edit'(f, fd) {
+    const key = f.dataset.key;
+    const ym = S.month;
+    const old = S.settings?.overrides?.[ym]?.[key];
+    const patch = { [ym]: {} };
+    // Старый перенос в другой месяц снимаем, чтобы не остался «висеть».
+    if (old?.movedTo) patch[old.movedTo.slice(0, 7)] = { [key]: null };
+    const amount = round2(C.num(fd.get('amount')));
+    const date = fd.get('date');
+    if (fd.get('skip') === 'on') {
+      patch[ym][key] = { skip: true };
+    } else if (date && date.slice(0, 7) !== ym) {
+      patch[ym][key] = { skip: true, movedTo: date };
+      patch[date.slice(0, 7)] = { ...(patch[date.slice(0, 7)] || {}), [key]: { day: Number(date.slice(8)), amount } };
+    } else {
+      patch[ym][key] = { amount, ...(date ? { day: Number(date.slice(8)) } : {}) };
+    }
+    save(H, { overrides: patch });
+    closeSheet();
+    toast('Платёж изменён');
+  },
   church(f, fd) {
     const clamp = (v) => Math.min(100, Math.max(0, round2(C.num(v))));
     save(H, { church: { tithe: clamp(fd.get('tithe')), offering: clamp(fd.get('offering')) } });
@@ -1160,6 +1230,8 @@ const ACTIONS = {
   },
   paydays: openPaydays,
   church: openChurch,
+  'pay-edit'(el) { openPayEdit(el.dataset.kind, el.dataset.id); },
+  'pay-reset'(el) { resetOverride(el.dataset.key); closeSheet(); toast('Вернул как обычно'); },
   'pay-church'(el) { openPayChurch(el.dataset.id); },
   cash: openCash,
   'cash-add'() {
