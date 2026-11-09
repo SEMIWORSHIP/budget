@@ -260,9 +260,12 @@ function loginView() {
       <button class="btn" data-act="demo-login" data-name="Аня">Войти как Аня</button>
     </div>`;
   }
+  let last = '';
+  try { last = localStorage.getItem('budget-last-email') || ''; } catch { /* ничего */ }
   return `<form class="auth" data-form="login">
     <h1>Наш бюджет</h1>
-    <label>Почта<input name="email" type="email" autocomplete="username" required></label>
+    <p class="muted small">Вход запоминается — входить нужно один раз. На айфоне Safari и иконка на экране «Домой» помнят вход отдельно, поэтому в иконке тоже войди один раз.</p>
+    <label>Почта<input name="email" type="email" autocomplete="username" value="${esc(last)}" required></label>
     <label>Пароль<input name="password" type="password" autocomplete="current-password" required></label>
     <button class="btn primary">Войти</button>
     <p class="muted small" id="login-err"></p>
@@ -376,6 +379,12 @@ function paidByPlan(list) {
 }
 
 // Платежи текущего месяца: обязательные, кредиты и разовые траты (включая просроченные разовые).
+const CHURCH = [['tithe', 'Десятина', '⛪'], ['offering', 'Пожертвования', '🤲']];
+function churchPct() {
+  const c = S.settings?.church;
+  return { tithe: c?.tithe ?? 10, offering: c?.offering ?? 3 };
+}
+
 // current = false — платежи будущего месяца: по ним ещё ничего не оплачено.
 function paymentItems(now = new Date(), current = true) {
   const list = current ? S.tx : [];
@@ -409,24 +418,37 @@ function paymentItems(now = new Date(), current = true) {
     const p = planPaid[pl.id] || 0;
     push({ kind: 'plan', id: pl.id, name: pl.name, emoji: pl.emoji || '🎈', amount: pl.amount || 0, due, paid: p, done: !!pl.done, oneOff: true });
   }
+  // Десятина и пожертвования: процент от всех доходов, внесённых в этом месяце. Отдать — сразу.
+  if (current) {
+    const income = list.filter((t) => t.type === 'income').reduce((s, t) => s + t.amount, 0);
+    const pct = churchPct();
+    for (const [key, name, emoji] of CHURCH) {
+      if (!(pct[key] > 0)) continue;
+      const owed = round2((income * pct[key]) / 100);
+      const given = list.filter((t) => t.church === key).reduce((s, t) => s + t.amount, 0);
+      if (!owed && !given) continue;
+      push({ kind: 'church', id: key, name, emoji, amount: owed, due: C.startOfDay(now), paid: given, done: given >= owed - 0.5, whenText: `${pct[key]}% от доходов ${C.MONTHS_GEN[now.getMonth()]}` });
+    }
+  }
   return items.sort((a, b) => (a.due ? a.due.getTime() : 9e15) - (b.due ? b.due.getTime() : 9e15) || a.name.localeCompare(b.name, 'ru'));
 }
 
 function paymentRow(i) {
   const today = C.startOfDay(new Date());
   let when = 'без даты';
-  if (i.due) {
+  if (i.whenText) when = i.whenText;
+  else if (i.due) {
     const d = i.due.getDate() + ' ' + C.MONTHS_GEN[i.due.getMonth()];
     when = i.due < today && !i.done ? `<span class="bad-text">просрочено, было до ${d}</span>` : (i.oneOff ? d : `до ${d}`);
   }
   const sub = i.assumed ? `${money(i.amount)} · оплачено до сверки`
     : i.done ? 'оплачено ' + money(i.paid)
     : i.paid > 0 ? `оплачено ${money(i.paid)} из ${money(i.amount)}` : `<b>${money(i.amount)}</b> · ${when}`;
-  const act = { cat: 'pay-cat', debt: 'pay-debt', plan: 'pay-plan' }[i.kind];
+  const act = { cat: 'pay-cat', debt: 'pay-debt', plan: 'pay-plan', church: 'pay-church' }[i.kind];
   return `<div class="row pay ${i.done ? 'done' : ''}">
     <span class="emo">${esc(i.emoji)}</span>
     <span class="grow"><span class="name">${esc(i.name)}${i.oneOff ? ' <span class="pill">разово</span>' : ''}</span><span class="sub">${sub}</span></span>
-    ${i.done ? '<span class="check" aria-label="Оплачено">✓</span>' : `<button class="btn small" data-act="${act}" data-id="${esc(i.id)}">Оплатить</button>`}
+    ${i.done ? '<span class="check" aria-label="Оплачено">✓</span>' : `<button class="btn small" data-act="${act}" data-id="${esc(i.id)}">${i.kind === 'church' ? 'Отдать' : 'Оплатить'}</button>`}
   </div>`;
 }
 
@@ -454,6 +476,7 @@ function onboardingView() {
 /* ---------- история ---------- */
 
 function txTitle(t) {
+  if (t.church) { const c = CHURCH.find((x) => x[0] === t.church); return [c?.[2] || '⛪', c?.[1] || 'Церковь']; }
   if (t.planId) { const p = S.planned.find((x) => x.id === t.planId); return [p?.emoji || '🎈', p?.name || t.title || 'Разовая трата']; }
   if (t.type === 'expense') { const c = catById(t.cat); return [c?.emoji || '•', c?.name || 'Без категории']; }
   if (t.type === 'income') return ['💰', t.source || 'Доход'];
@@ -589,7 +612,9 @@ function planView() {
   const life = varCats().reduce((s, c) => s + (c.limit || 0), 0);
   const thisMonth = S.planned.filter((p) => !p.done && p.date && p.date.slice(0, 7) === S.month);
   const oneOff = thisMonth.reduce((s, p) => s + (p.amount || 0), 0);
-  const free = inc - fixed - debts - life - oneOff;
+  const pct = churchPct();
+  const church = round2((inc * (pct.tithe + pct.offering)) / 100);
+  const free = inc - church - fixed - debts - life - oneOff;
   const catRow = (c) => `<button class="row plain" data-act="cat-edit" data-id="${esc(c.id)}">
       <span class="emo">${esc(c.emoji || '•')}</span>
       <span class="grow name">${esc(c.name)}${c.kind === 'fixed' && c.day ? ` <span class="muted small">до ${c.day} числа</span>` : ''}</span>
@@ -622,13 +647,14 @@ function planView() {
     <button class="btn small" data-act="income-edit" data-id="">+ Доход</button>
     <div class="sum-table">
       <div class="kv"><span>Доход в месяц</span><b>${money(inc)}</b></div>
+      ${church ? `<div class="kv"><span>− Десятина и пожертвования, ${pct.tithe + pct.offering}%</span><b>${money(church)}</b></div>` : ''}
       <div class="kv"><span>− Обязательные платежи</span><b>${money(fixed)}</b></div>
       <div class="kv"><span>− Кредиты</span><b>${money(debts)}</b></div>
       <div class="kv"><span>− Лимиты на жизнь</span><b>${money(life)}</b></div>
       ${oneOff ? `<div class="kv"><span>− Разовые в ${C.MONTHS_PREP[Number(S.month.slice(5)) - 1]}</span><b>${money(oneOff)}</b></div>` : ''}
       <div class="kv total"><span>Свободно на цели и досрочку</span><b class="${free < 0 ? 'bad-text' : 'good-text'}">${money(free)}</b></div>
     </div>
-    <p class="muted small">Подработку в план не закладываем: что пришло сверху, сразу в цели или в самый дорогой долг.</p>
+    <p class="muted small">Подработку в план не закладываем: что пришло сверху, сразу в цели или в самый дорогой долг (после десятины и пожертвований с неё).</p>
   </section>
   <section class="card">
     <h2>Лимиты на жизнь <span class="muted small">${money(life)}</span></h2>
@@ -641,6 +667,7 @@ function planView() {
   <section class="card">
     <h2>Настройки</h2>
     <button class="row plain" data-act="paydays"><span class="emo">📅</span><span class="grow name">Дни зарплаты</span><span class="amt">${paydays().join(' и ')}</span></button>
+    <button class="row plain" data-act="church"><span class="emo">⛪</span><span class="grow name">Десятина и пожертвования</span><span class="amt">${pct.tithe}% + ${pct.offering}%</span></button>
     <button class="row plain" data-act="ics"><span class="emo">🔔</span><span class="grow name">Напоминания в календарь телефона</span><span class="amt">›</span></button>
     <label class="row plain"><span class="emo">📥</span><span class="grow name">Загрузить данные из файла</span><span class="amt">›</span><input type="file" accept=".json,application/json" data-import hidden></label>
     <button class="row plain" data-act="logout"><span class="emo">👤</span><span class="grow name">${esc(myName())}</span><span class="amt muted">Выйти</span></button>
@@ -736,15 +763,17 @@ function saveIncome(src) {
   addTx({ type: 'income', source: src, ...q });
   closeSheet();
   toast(`+${money(q.amount)} · ${src}`);
-  if ((S.settings?.incomes || []).some((i) => i.name === src)) askPaydayReceived();
+  const inc = (S.settings?.incomes || []).find((i) => i.name === src);
+  if (inc) askPaydayReceived(inc.day);
 }
 
 // Зарплату дали раньше срока — дальше «можно тратить» считаем до следующей.
-function askPaydayReceived() {
+// day — число из названия дохода («Зарплата Сэма, 15-е»): тогда спрашиваем именно про него.
+function askPaydayReceived(day) {
   const today = C.startOfDay(new Date());
   const received = S.settings?.received || [];
-  const soon = C.paydaysBetween(today, new Date(today.getTime() + 11 * 864e5), paydays())
-    .find((d) => !received.includes(C.isoDate(d)));
+  const soon = C.paydaysBetween(today, new Date(today.getTime() + (day ? 25 : 11) * 864e5), paydays())
+    .find((d) => !received.includes(C.isoDate(d)) && (!day || d.getDate() === Math.min(day, C.daysInMonth(d.getFullYear(), d.getMonth()))));
   if (!soon) return;
   const after = C.paydaysBetween(new Date(soon.getTime() + 864e5), new Date(soon.getFullYear(), soon.getMonth() + 3, 1), paydays())[0];
   const title = (d) => d.getDate() + ' ' + C.MONTHS_GEN[d.getMonth()];
@@ -896,6 +925,29 @@ function openPayPlan(id) {
   </form>`);
 }
 
+function openChurch() {
+  const pct = churchPct();
+  openSheet(`<form data-form="church">
+    <h2>Десятина и пожертвования</h2>
+    <p class="muted small">Считаются от каждого внесённого дохода, включая подработку. Сумма «к отдаче» появляется в платежах месяца сразу после записи дохода.</p>
+    ${field('Десятина, %', 'tithe', pct.tithe, numAttrs)}
+    ${field('Пожертвования, %', 'offering', pct.offering, numAttrs)}
+    <button class="btn primary">Сохранить</button>
+  </form>`);
+}
+
+function openPayChurch(key) {
+  const item = paymentItems().find((i) => i.kind === 'church' && i.id === key);
+  if (!item) return;
+  openSheet(`<form data-form="pay-church" data-id="${esc(key)}">
+    <h2>${esc(item.emoji)} ${esc(item.name)}</h2>
+    <p class="muted small">${esc(item.whenText)}: ${money(item.amount)}${item.paid ? `, уже отдано ${money(item.paid)}` : ''}.</p>
+    ${field('Сколько отдали, ₽', 'amount', Math.max(0, round2(item.amount - item.paid)) || '', numAttrs + ' required')}
+    ${field('Дата', 'date', C.isoDate(), 'type="date"')}
+    <button class="btn primary">Записать</button>
+  </form>`);
+}
+
 function openPaydays() {
   openSheet(`<form data-form="paydays">
     <h2>Дни зарплаты</h2>
@@ -925,6 +977,7 @@ const FORMS = {
     err.textContent = '';
     try {
       await S.store.signIn(fd.get('email'), fd.get('password'));
+      try { localStorage.setItem('budget-last-email', String(fd.get('email')).trim()); } catch { /* ничего */ }
     } catch (e) {
       err.textContent = /invalid|wrong|not-found|credential/.test(e?.code || '') ? 'Неверная почта или пароль' : 'Не получилось войти: ' + (e?.code || e?.message || e);
     }
@@ -1010,7 +1063,7 @@ const FORMS = {
     const list = [...(S.settings?.incomes || [])];
     const item = { id: f.dataset.id || 'i' + Date.now().toString(36), name: String(fd.get('name')).trim(), amount: round2(C.num(fd.get('amount'))) };
     const idx = list.findIndex((x) => x.id === item.id);
-    if (idx >= 0) list[idx] = item; else list.push(item);
+    if (idx >= 0) list[idx] = { ...list[idx], ...item }; else list.push(item);
     save(H, { incomes: list });
     closeSheet();
   },
@@ -1044,6 +1097,19 @@ const FORMS = {
     save(`${H}/planned/${p.id}`, { done: true });
     closeSheet();
     toast(`${p.name}: −${money(amount)}`);
+  },
+  church(f, fd) {
+    const clamp = (v) => Math.min(100, Math.max(0, round2(C.num(v))));
+    save(H, { church: { tithe: clamp(fd.get('tithe')), offering: clamp(fd.get('offering')) } });
+    closeSheet();
+  },
+  'pay-church'(f, fd) {
+    const amount = round2(C.num(fd.get('amount')));
+    if (!(amount > 0)) return toast('Сумма должна быть больше нуля', 'bad');
+    const key = f.dataset.id;
+    addTx({ type: 'expense', cat: null, church: key, amount, note: '', date: fd.get('date') || C.isoDate() });
+    closeSheet();
+    toast(`${CHURCH.find((x) => x[0] === key)?.[1]}: ${money(amount)}`);
   },
   paydays(f, fd) {
     const days = [...new Set(String(fd.get('days')).split(/[^\d]+/).map(Number).filter((d) => d >= 1 && d <= 31))].sort((a, b) => a - b);
@@ -1093,6 +1159,8 @@ const ACTIONS = {
     closeSheet();
   },
   paydays: openPaydays,
+  church: openChurch,
+  'pay-church'(el) { openPayChurch(el.dataset.id); },
   cash: openCash,
   'cash-add'() {
     $('#cash-rows').insertAdjacentHTML('beforeend', cashRow());
@@ -1156,17 +1224,34 @@ function startEmpty() {
 async function importFile(file) {
   let d;
   try { d = JSON.parse(await file.text()); } catch { toast('Это не файл с данными', 'bad'); return; }
-  if (!confirm('Загрузить данные из файла? Записи с теми же номерами перезапишутся.')) return;
-  if (d.settings) save(H, { paydays: d.settings.paydays || paydays(), incomes: d.settings.incomes || [] });
-  if (d.cash?.accounts?.length) save(H, { cash: { accounts: d.cash.accounts, at: Date.now() } });
-  for (const [kind, list] of [['cats', d.cats], ['debts', d.debts], ['goals', d.goals], ['planned', d.planned]]) {
-    (list || []).forEach((item, i) => {
+  // Файл может быть полным (seed.json) или частичным: меняется только то, что в нём есть.
+  const parts = [];
+  if (d.settings?.paydays) parts.push('дни зарплаты');
+  if (d.settings?.incomes) parts.push('доходы');
+  if (d.settings?.church) parts.push('десятина');
+  if (d.cash?.accounts?.length) parts.push('остатки на картах');
+  const names = { cats: 'категории', debts: 'долги', goals: 'цели', planned: 'разовые траты' };
+  for (const k of Object.keys(names)) if (d[k]?.length) parts.push(names[k]);
+  if (!parts.length) { toast('В файле нечего загружать', 'bad'); return; }
+  if (!confirm(`Загрузить из файла: ${parts.join(', ')}? Остальное не изменится.`)) return;
+
+  const settings = {};
+  for (const k of ['paydays', 'incomes', 'church']) if (d.settings?.[k]) settings[k] = d.settings[k];
+  if (d.cash?.accounts?.length) settings.cash = { accounts: d.cash.accounts, at: Date.now() };
+  if (Object.keys(settings).length) save(H, settings);
+
+  for (const kind of Object.keys(names)) {
+    const current = { cats: S.cats, debts: S.debts, goals: S.goals, planned: S.planned }[kind];
+    let order = nextOrder(current);
+    for (const item of d[kind] || []) {
       const { id, ...rest } = item;
-      if (kind === 'debts') rest.rate = rateOf(rest);
-      save(`${H}/${kind}/${id || S.store.newId(`${H}/${kind}`)}`, { order: i + 1, ...rest });
-    });
+      const old = id && current.find((x) => x.id === id);
+      if (!old && rest.order == null) rest.order = order++;
+      if (kind === 'debts') rest.rate = rateOf({ ...(old || {}), ...rest });
+      save(`${H}/${kind}/${id || S.store.newId(`${H}/${kind}`)}`, rest);
+    }
   }
-  toast('Данные загружены');
+  toast('Загружено: ' + parts.join(', '));
 }
 
 /* ---------- календарь ---------- */

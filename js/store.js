@@ -3,7 +3,9 @@
 import { config } from './config.js';
 
 export async function createStore() {
-  return config.firebase ? createLiveStore() : createDemoStore();
+  // ?demo в адресе — пробный режим на данных этого браузера, общую базу не трогает.
+  const demo = new URLSearchParams(location.search).has('demo');
+  return config.firebase && !demo ? createLiveStore() : createDemoStore();
 }
 
 async function createLiveStore() {
