@@ -1,5 +1,5 @@
-import { createStore } from './store.js';
-import * as C from './calc.js';
+import { createStore } from './store.js?v=4';
+import * as C from './calc.js?v=4';
 
 const H = 'households/main';
 const txPath = (key) => `${H}/months/${key}/tx`;
@@ -543,14 +543,56 @@ function historyView() {
 
 /* ---------- цели ---------- */
 
+// Сколько откладывать на цель и когда соберём.
+function goalPlan(g) {
+  const per = paydays().length || 1;
+  const p = C.goalPace(g, paydays());
+  const left = Math.max(0, (g.target || 0) - (g.saved || 0));
+  const monthly = g.perMonth > 0 ? g.perMonth : 0;
+  const later = !!(g.from && g.from > S.month);
+  const need = p.perPayday ? p.perPayday * per : 0;
+  let eta = null;
+  if (monthly && left) {
+    const [y, m] = (later ? g.from : S.month).split('-').map(Number);
+    eta = new Date(y, m - 1 + Math.ceil(left / monthly) - 1, 1);
+  }
+  const lateForDeadline = !!(g.deadline && eta && C.ym(eta) > g.deadline.slice(0, 7));
+  return { per, left, monthly, later, need, eta, lateForDeadline, done: !!p.done, late: !!p.late, perPayday: p.perPayday, count: p.count };
+}
+
+// Сколько из свободных денег этого месяца уже расписано по целям.
+function goalsSummary() {
+  const pn = planNumbers();
+  let planned = 0;
+  for (const g of [...S.goals, ...S.priv]) {
+    const gp = goalPlan(g);
+    if (gp.done || gp.later) continue;
+    planned += gp.monthly || (g.deadline && !gp.late ? gp.need : 0);
+  }
+  return { free: pn.free, planned, rest: pn.free - planned };
+}
+
 function goalCard(g, priv) {
   const pct = g.target ? Math.min(100, ((g.saved || 0) / g.target) * 100) : 0;
-  const p = C.goalPace(g, paydays());
-  let pace;
-  if (p.done) pace = '<span class="good-text">Собрано 🎉</span>';
-  else if (!g.deadline) pace = `осталось ${money(p.left)} · без срока`;
-  else if (p.late) pace = `<span class="bad-text">срок ${C.deadlineTitle(g.deadline)} прошёл, осталось ${money(p.left)}</span>`;
-  else pace = `до ${C.deadlineTitle(g.deadline)} · <b>≈ ${money(p.perPayday)}</b> с каждой зарплаты (${p.count} ${C.plural(p.count, 'зарплата', 'зарплаты', 'зарплат')})`;
+  const gp = goalPlan(g);
+  const lines = [];
+  if (gp.done) lines.push('<span class="good-text">Собрано 🎉</span>');
+  else {
+    if (gp.monthly) {
+      const fromTxt = gp.later ? ` с ${C.MONTHS_GEN[Number(g.from.slice(5)) - 1]}` : '';
+      lines.push(`<span class="pace">Откладывать${fromTxt} <b>${money(gp.monthly)}</b> в месяц<br>≈ ${money(gp.monthly / gp.per)} с каждой зарплаты</span>`);
+      if (gp.eta) lines.push(`накопите в ${C.MONTHS_PREP[gp.eta.getMonth()]} ${gp.eta.getFullYear()}`);
+      if (gp.lateForDeadline) lines.push(`<span class="bad-text">к ${C.deadlineTitle(g.deadline)} не успеть: нужно ${money(gp.need)} в месяц</span>`);
+    } else if (g.deadline && gp.late) {
+      lines.push(`<span class="bad-text">срок ${C.deadlineTitle(g.deadline)} прошёл</span>`);
+    } else if (g.deadline) {
+      lines.push(`<span class="pace">Чтобы успеть к ${C.deadlineTitle(g.deadline)}: <b>${money(gp.need)}</b> в месяц<br>≈ ${money(gp.perPayday)} с каждой зарплаты (${gp.count} ${C.plural(gp.count, 'зарплата', 'зарплаты', 'зарплат')})</span>`);
+    } else {
+      lines.push('Сколько откладывать в месяц, не задано — нажми «Изменить»');
+    }
+    lines.push(`осталось ${money(gp.left)}`);
+  }
+  const pace = lines.join('<br>');
   const pv = priv ? '1' : '';
   return `<div class="goal">
     <div class="line"><span class="name">${esc(g.emoji || '🎯')} ${esc(g.name)}</span><span class="amt">${money(g.saved || 0)} / ${money(g.target || 0)}</span></div>
@@ -564,7 +606,19 @@ function goalCard(g, priv) {
 }
 
 function goalsView() {
-  const shared = `<section class="card">
+  const sum = goalsSummary();
+  const monthPrep = C.MONTHS_PREP[Number(S.month.slice(5)) - 1];
+  const top = `<section class="card">
+    <h2>Деньги на цели в ${monthPrep}</h2>
+    <div class="debt-line">
+      <div><span>Свободно по плану</span><b class="${sum.free < 0 ? 'bad-text' : ''}">${money(sum.free)}</b></div>
+      <div><span>Расписано на цели</span><b>${money(sum.planned)}</b></div>
+    </div>
+    <p class="muted small goals-note">${sum.rest >= 0
+      ? `Остаётся ${money(sum.rest)} — можно в самый дорогой долг.`
+      : `Не хватает ${money(-sum.rest)}. Его закрывает подработка (после 13% церкви) или нужно урезать лимиты во вкладке «План».`}</p>
+  </section>`;
+  const shared = top + `<section class="card">
     <h2>Общие цели</h2>
     ${S.goals.map((g) => goalCard(g, false)).join('') || '<p class="muted">Целей пока нет.</p>'}
     <button class="btn" data-act="goal-edit" data-id="">+ Новая цель</button>
@@ -621,17 +675,22 @@ function debtsView() {
 
 /* ---------- план ---------- */
 
-function planView() {
+// Месячный план: доход минус церковь, обязательные, кредиты, лимиты и разовые этого месяца.
+function planNumbers() {
   const incomes = S.settings?.incomes || [];
   const inc = incomes.reduce((s, i) => s + (i.amount || 0), 0);
   const fixed = fixedCats().reduce((s, c) => s + (c.limit || 0), 0);
   const debts = S.debts.filter((d) => !d.paused && d.balance > 0).reduce((s, d) => s + debtPayment(d), 0);
   const life = varCats().reduce((s, c) => s + (c.limit || 0), 0);
-  const thisMonth = S.planned.filter((p) => !p.done && p.date && p.date.slice(0, 7) === S.month);
-  const oneOff = thisMonth.reduce((s, p) => s + (p.amount || 0), 0);
+  const oneOff = S.planned.filter((p) => !p.done && p.date && p.date.slice(0, 7) === S.month).reduce((s, p) => s + (p.amount || 0), 0);
   const pct = churchPct();
   const church = round2((inc * (pct.tithe + pct.offering)) / 100);
-  const free = inc - church - fixed - debts - life - oneOff;
+  const regular = inc - church - fixed - debts - life;
+  return { incomes, inc, fixed, debts, life, oneOff, pct, church, regular, free: regular - oneOff };
+}
+
+function planView() {
+  const { incomes, inc, fixed, debts, life, oneOff, pct, church, free } = planNumbers();
   const catRow = (c) => `<button class="row plain" data-act="cat-edit" data-id="${esc(c.id)}">
       <span class="emo">${esc(c.emoji || '•')}</span>
       <span class="grow name">${esc(c.name)}${c.kind === 'fixed' && c.day ? ` <span class="muted small">до ${c.day} числа</span>` : ''}</span>
@@ -866,6 +925,8 @@ function openGoalEdit(id, priv) {
     ${field('Сколько нужно, ₽', 'target', g.target ?? '', numAttrs + ' required')}
     ${field('Уже собрано, ₽', 'saved', g.saved ?? 0, numAttrs)}
     ${field('К какой дате (можно пусто)', 'deadline', g.deadline || '', 'type="date"')}
+    ${field('Откладывать в месяц, ₽', 'perMonth', g.perMonth || '', numAttrs)}
+    ${field('Начать откладывать с месяца (можно пусто)', 'from', g.from || '', 'type="month"')}
     <button class="btn primary">Сохранить</button>
     ${id ? `<button type="button" class="btn danger" data-act="goal-del" data-id="${esc(id)}" data-priv="${priv ? '1' : ''}">Удалить цель</button>` : ''}
   </form>`);
@@ -1089,6 +1150,8 @@ const FORMS = {
       target: round2(C.num(fd.get('target'))),
       saved: round2(C.num(fd.get('saved'))),
       deadline: fd.get('deadline') || '',
+      perMonth: round2(C.num(fd.get('perMonth'))),
+      from: fd.get('from') || '',
     };
     if (!f.dataset.id) data.order = nextOrder(goalList(priv));
     save(`${base}/${id}`, data);
@@ -1304,6 +1367,7 @@ async function importFile(file) {
   if (d.cash?.accounts?.length) parts.push('остатки на картах');
   const names = { cats: 'категории', debts: 'долги', goals: 'цели', planned: 'разовые траты' };
   for (const k of Object.keys(names)) if (d[k]?.length) parts.push(names[k]);
+  if (d.privateGoals?.length) parts.push('скрытые цели (только в твой аккаунт)');
   if (!parts.length) { toast('В файле нечего загружать', 'bad'); return; }
   if (!confirm(`Загрузить из файла: ${parts.join(', ')}? Остальное не изменится.`)) return;
 
@@ -1321,6 +1385,15 @@ async function importFile(file) {
       if (!old && rest.order == null) rest.order = order++;
       if (kind === 'debts') rest.rate = rateOf({ ...(old || {}), ...rest });
       save(`${H}/${kind}/${id || S.store.newId(`${H}/${kind}`)}`, rest);
+    }
+  }
+  if (d.privateGoals?.length) {
+    let order = nextOrder(S.priv);
+    for (const item of d.privateGoals) {
+      const { id, ...rest } = item;
+      const old = id && S.priv.find((x) => x.id === id);
+      if (!old && rest.order == null) rest.order = order++;
+      save(`private/${S.user.uid}/goals/${id || S.store.newId(`private/${S.user.uid}/goals`)}`, rest);
     }
   }
   toast('Загружено: ' + parts.join(', '));

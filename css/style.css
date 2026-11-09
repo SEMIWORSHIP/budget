@@ -408,3 +408,7 @@ details.more summary { font-size: 14px; color: var(--muted); padding: 8px 0; cur
   .qa-row { grid-template-columns: 1fr; }
   .tab span { font-size: 10px; }
 }
+
+.pace { color: var(--text); }
+.pace b { font-weight: 700; }
+.goals-note { margin: 10px 0 0; }
